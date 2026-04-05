@@ -1,1 +1,561 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RFU Designer (Standalone)</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body style="margin:0; background:#050505; overflow:hidden;">
+    <div id="root"></div>
+    <script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+// Constants
+const OPS = ["ADD","SUB","AND","OR","XOR","MUX","PassA","PassB"];
+const OP_BITS = {ADD:0,SUB:1,AND:2,OR:3,XOR:4,MUX:5,PassA:6,PassB:7};
+const OP_CLR = {
+  ADD:"#f5f5f5", SUB:"#dedede", AND:"#c7c7c7", OR:"#b0b0b0",
+  XOR:"#999999", MUX:"#828282", PassA:"#6b6b6b", PassB:"#545454"
+};
+const OP_DESC = {
+  ADD:"A + B", SUB:"A - B", AND:"A & B (bitwise)", OR:"A | B (bitwise)",
+  XOR:"A ^ B (bitwise)", MUX:"B if A!=0, else 0", PassA:"Output = A", PassB:"Output = B"
+};
+const KEYS = ["A","B","C","D","E","F","G","H"];
+const PVKS = ["P0","P1","P2","P3"];
+
+// Canvas layout constants
+const CW=680, CH=750;
+const NW=108, NH=64, CGAP=44, RGAP=110;
+const SX=Math.round((CW-(4*NW+3*CGAP))/2); // about 58
+const SY=132, PIY=46;
+
+const nx = c => SX + c*(NW+CGAP);
+const ny = r => SY + r*(NH+RGAP);
+const pA  = (r,c) => ({x: nx(c)+NW*0.28, y: ny(r)});
+const pB  = (r,c) => ({x: nx(c)+NW*0.72, y: ny(r)});
+const pO  = (r,c) => ({x: nx(c)+NW*0.5,  y: ny(r)+NH});
+const piP = i    => ({x: 50 + i*((CW-100)/7), y: PIY});
+
+// Computation
+const calc = (a,b,op) => {
+  if(op==="ADD")   return a+b;
+  if(op==="SUB")   return a-b;
+  if(op==="AND")   return (a&b)>>>0;
+  if(op==="OR")    return (a|b)>>>0;
+  if(op==="XOR")   return (a^b)>>>0;
+  if(op==="MUX")   return a ? b : 0;
+  if(op==="PassA") return a;
+  if(op==="PassB") return b;
+  return 0;
+};
+
+const simAll = (iv, nodes) => {
+  const inp = KEYS.map(k => iv[k]);
+  let prev = [0,0,0,0];
+  return nodes.map(row => {
+    const v = [...inp, ...prev];
+    prev = row.map(({selA,selB,op}) => calc(v[selA], v[selB], op));
+    return [...prev];
+  });
+};
+
+const buildCfg = rn => {
+  let c = BigInt(0);
+  for(let i=0;i<4;i++){
+    c |= BigInt(rn[i].selA) << BigInt(60-i*8);
+    c |= BigInt(rn[i].selB) << BigInt(56-i*8);
+  }
+  for(let i=0;i<4;i++) c |= BigInt(OP_BITS[rn[i].op]) << BigInt(29-i*3);
+  return c.toString(16).toUpperCase().padStart(16,'0');
+};
+
+const inputOpts = r => [
+  ...KEYS.map((n,i) => ({l:n, v:i})),
+  ...(r>0 ? PVKS.map((n,i) => ({l:n, v:8+i})) : [])
+];
+const iname = (r,i) => i<8 ? KEYS[i] : PVKS[i-8];
+const gsrc  = (r,i) => i<8 ? piP(i) : (r>0 ? pO(r-1,i-8) : piP(0));
+
+// Default DFG (matches original Python)
+const DEF = [
+  [{selA:0,selB:1,op:"ADD"},{selA:2,selB:3,op:"ADD"},{selA:4,selB:5,op:"ADD"},{selA:6,selB:7,op:"ADD"}],
+  [{selA:8,selB:9,op:"XOR"},{selA:10,selB:11,op:"XOR"},{selA:8,selB:10,op:"AND"},{selA:9,selB:11,op:"OR"}],
+  [{selA:8,selB:9,op:"XOR"},{selA:10,selB:11,op:"XOR"},{selA:8,selB:10,op:"AND"},{selA:9,selB:11,op:"OR"}],
+  [{selA:8,selB:9,op:"XOR"},{selA:10,selB:11,op:"XOR"},{selA:8,selB:10,op:"AND"},{selA:9,selB:11,op:"OR"}],
+];
+
+// Shared style tokens
+const TEXT_SCALE = 1.45;
+const f = (n) => Math.round(n*TEXT_SCALE);
+const HOWTO_SCALE = 0.82;
+const hf = (n) => Math.round(f(n)*HOWTO_SCALE);
+const LEFT_SCALE = 0.88;
+const lf = (n) => Math.round(f(n)*LEFT_SCALE);
+
+const T = {
+  bg0:"#050505", bg1:"#0c0c0c", bg2:"#141414", bg3:"#1d1d1d",
+  bdr:"#2c2c2c", acc:"#f2f2f2", muted:"#8f8f8f", dim:"#b7b7b7",
+  font:"'JetBrains Mono',ui-monospace,Menlo,monospace",
+};
+const selSty = {
+  width:"100%", background:T.bg3, color:"#e2e8f0",
+  border:"1px solid "+T.bdr, padding:"4px 6px",
+  borderRadius:5, fontSize:f(11), fontFamily:T.font, marginBottom:11,
+  outline:"none",
+};
+const secHdr = (mt=14) => ({
+  color:T.dim, fontSize:f(8), textTransform:"uppercase",
+  letterSpacing:2, marginTop:mt, marginBottom:7, borderBottom:"1px solid "+T.bdr, paddingBottom:4,
+});
+
+// Main Component
+function RFUDesigner() {
+  const [nodes, setNodes] = useState(DEF.map(r => r.map(n => ({...n}))));
+  const [iv, setIv]       = useState({A:10,B:5,C:8,D:2,E:7,F:3,G:12,H:4});
+  const [sel, setSel]     = useState(null);   // {r,c}
+  const [drag, setDrag]   = useState(null);   // {type:"pi"|"no", idx?|row,col}
+  const [mp, setMp]       = useState({x:0,y:0});
+  const [copied, setCopied] = useState(false);
+  const [vsz, setVsz] = useState({w:CW, h:CH});
+  const cvs = useRef(null);
+  const stage = useRef(null);
+
+  useEffect(() => {
+    if(!stage.current) return;
+    const updSize = () => {
+      const rc = stage.current.getBoundingClientRect();
+      setVsz({w: rc.width, h: rc.height});
+    };
+    updSize();
+    const ro = new ResizeObserver(updSize);
+    ro.observe(stage.current);
+    window.addEventListener("resize", updSize);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", updSize);
+    };
+  }, []);
+
+  const stages = simAll(iv, nodes);
+  const cfgs   = nodes.map(buildCfg);
+  const selN   = sel ? nodes[sel.r][sel.c] : null;
+
+  const upd = (r,c,u) => setNodes(p => {
+    const n = p.map(row => row.map(nd => ({...nd})));
+    n[r][c] = {...n[r][c], ...u};
+    return n;
+  });
+
+  const getXY = e => {
+    const rc = stage.current.getBoundingClientRect();
+    return {x: (e.clientX-rc.left-ox)/scale, y: (e.clientY-rc.top-oy)/scale};
+  };
+
+  const onMM = e => { if(drag) setMp(getXY(e)); };
+  const onMU = ()  => setDrag(null);
+
+  const startD = (e, src) => {
+    e.preventDefault(); e.stopPropagation();
+    setDrag(src); setMp(getXY(e));
+  };
+
+  const drop = (e, r, c, port) => {
+    e.preventDefault(); e.stopPropagation();
+    if(!drag) return;
+    let val = null;
+    if(drag.type==="pi") {
+      val = drag.idx;
+    } else if(drag.type==="no") {
+      if(drag.row !== r-1) { setDrag(null); return; }
+      val = 8 + drag.col;
+    }
+    if(val !== null) upd(r, c, port==="A" ? {selA:val} : {selB:val});
+    setDrag(null);
+  };
+
+  const ds = drag
+    ? (drag.type==="pi" ? piP(drag.idx) : pO(drag.row, drag.col))
+    : {x:0,y:0};
+
+  const fit = Math.min(vsz.w/CW, vsz.h/CH);
+  const scale = Number.isFinite(fit) && fit > 0 ? fit : 1;
+  const ox = (vsz.w - CW*scale) / 2;
+  const oy = Math.max(0, (vsz.h - CH*scale) / 2 - 24);
+
+  // Build SVG connection paths
+  const conns = [];
+  for(let r=0;r<4;r++) for(let c=0;c<4;c++){
+    const {selA, selB} = nodes[r][c];
+    const pa = pA(r,c), pb = pB(r,c);
+    const sa = gsrc(r,selA), sb = gsrc(r,selB);
+    const isSel = sel?.r===r && sel?.c===c;
+    const mA = (sa.y+pa.y)/2, mB = (sb.y+pb.y)/2;
+    conns.push({key:`${r}${c}A`, d:`M${sa.x},${sa.y}C${sa.x},${mA} ${pa.x},${mA} ${pa.x},${pa.y}`,
+      color:selA<8?"#ededed":"#7f7f7f", hi:isSel});
+    conns.push({key:`${r}${c}B`, d:`M${sb.x},${sb.y}C${sb.x},${mB} ${pb.x},${mB} ${pb.x},${pb.y}`,
+      color:selB<8?"#bdbdbd":"#7f7f7f", hi:isSel});
+  }
+
+  const copyVerilog = () => {
+    const txt = KEYS.map(k=>`${k} = ${iv[k]};`).join('\n')
+      + '\n\n' + cfgs.map((c,i)=>`config_C${i} = 64'h${c};`).join('\n')
+      + '\n\n// Expected outputs\n' + stages[3].map((v,i)=>`// result_${i} = ${v}`).join('\n');
+    navigator.clipboard.writeText(txt).then(() => { setCopied(true); setTimeout(()=>setCopied(false),2000); });
+  };
+
+  return (
+    <div style={{display:"flex",background:T.bg0,color:"#e2e8f0",
+      fontFamily:T.font,height:"100vh",width:"100vw",fontSize:f(12),overflowY:"auto",overflowX:"hidden"}}
+      onMouseMove={onMM} onMouseUp={onMU}>
+
+      {/* LEFT SIDEBAR */}
+      <div style={{width:176,flexShrink:0,padding:"10px 9px",background:T.bg1,
+        borderRight:"1px solid "+T.bdr,overflowY:"auto",display:"flex",flexDirection:"column"}}>
+
+        {/* Logo */}
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:18}}>
+          <div style={{width:8,height:8,background:"#f2f2f2",borderRadius:2,boxShadow:"0 0 8px #ffffff66"}}/>
+          <span style={{color:T.acc,fontSize:lf(12),fontWeight:"bold",letterSpacing:1}}>RFU Designer</span>
+        </div>
+
+        <div style={secHdr(0)}>Primary Inputs</div>
+        {KEYS.map(k => (
+          <div key={k} style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+            <span style={{width:10,color:"#d4d4d4",fontWeight:"bold",fontSize:lf(11)}}>{k}</span>
+            <input type="number" value={iv[k]}
+              onChange={e=>setIv(v=>({...v,[k]:parseInt(e.target.value)||0}))}
+              style={{width:66,background:T.bg3,color:"#e2e8f0",border:"1px solid "+T.bdr,
+                padding:"3px 7px",borderRadius:4,fontSize:lf(11),fontFamily:T.font,outline:"none"}}
+            />
+          </div>
+        ))}
+
+        <div style={secHdr()}>Config Words</div>
+        {cfgs.map((c,i) => (
+          <div key={i} style={{marginBottom:8}}>
+            <div style={{color:T.muted,fontSize:lf(8),marginBottom:2}}>config_C{i}</div>
+            <div style={{color:"#eeeeee",fontSize:lf(9),letterSpacing:.3,lineHeight:1.4,
+              background:T.bg3,padding:"3px 6px",borderRadius:4,borderLeft:"2px solid #eeeeee66"}}>
+              64'h{c}
+            </div>
+          </div>
+        ))}
+
+        <div style={secHdr()}>Final Outputs</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:14}}>
+          {stages[3].map((v,i) => (
+            <div key={i} style={{background:T.bg3,border:"1px solid "+T.bdr,borderRadius:6,padding:"5px 8px"}}>
+              <div style={{color:"#cfcfcf",fontSize:lf(8),marginBottom:2}}>P{i}</div>
+              <div style={{color:"#f5f5f5",fontSize:lf(14),fontWeight:"bold"}}>{v}</div>
+            </div>
+          ))}
+        </div>
+
+      </div>
+
+      {/* DFG CANVAS */}
+      <div ref={stage} style={{flex:1,minWidth:0,position:"relative",overflow:"hidden",padding:4}}>
+        <div ref={cvs} style={{
+          position:"absolute",left:ox,top:oy,width:CW,height:CH,overflow:"hidden",
+          transform:`scale(${scale})`,transformOrigin:"top left"
+        }}>
+        <svg style={{position:"absolute",top:0,left:0,width:CW,height:CH,pointerEvents:"none"}}>
+          <defs>
+            <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+              <circle cx="1" cy="1" r=".9" fill="#222"/>
+            </pattern>
+            <filter id="glow">
+              <feGaussianBlur stdDeviation="3" result="blur"/>
+              <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#grid)"/>
+
+          {/* Row lane backgrounds */}
+          {[0,1,2,3].map(r => (
+            <g key={r}>
+              <rect x={SX-10} y={ny(r)-7} width={4*NW+3*CGAP+20} height={NH+14}
+                rx="8" fill={T.bg2} stroke={T.bdr} strokeWidth="1"/>
+              <text x={SX-16} y={ny(r)+NH/2+4} textAnchor="end"
+                fill={T.muted} fontSize="9" fontFamily={T.font}>R{r}</text>
+            </g>
+          ))}
+
+          {/* Column headers */}
+          {[0,1,2,3].map(c => (
+            <text key={c} x={nx(c)+NW/2} y={SY-17} textAnchor="middle"
+              fill={T.bdr} fontSize="8" fontFamily={T.font}>C{c}</text>
+          ))}
+
+          {/* Connection wires */}
+          {conns.map(({key,d,color,hi}) => (
+            <path key={key} d={d} fill="none"
+              stroke={color} strokeWidth={hi?2.5:1.5} strokeOpacity={hi?0.95:0.38}
+              style={hi?{filter:`drop-shadow(0 0 4px ${color})`}:{}}/>
+          ))}
+
+          {/* Live drag wire */}
+          {drag && (
+            <line x1={ds.x} y1={ds.y} x2={mp.x} y2={mp.y}
+              stroke="#d4d4d4" strokeWidth="2" strokeDasharray="7,3" strokeOpacity=".9"/>
+          )}
+
+          {/* Primary inputs label */}
+          <text x={CW/2} y={PIY-20} textAnchor="middle"
+            fill={T.muted} fontSize="8" fontFamily={T.font} letterSpacing="2">
+            PRIMARY INPUTS - DRAG TO NODE PORTS
+          </text>
+        </svg>
+
+        {/* Primary input circles */}
+        {KEYS.map((nm,i) => {
+          const p = piP(i);
+          return (
+            <div key={nm} title={`${nm} = ${iv[nm]}  (drag to connect)`} style={{
+              position:"absolute", left:p.x-17, top:p.y-17,
+              width:34, height:34, borderRadius:"50%",
+              background:"linear-gradient(135deg,#1f1f1f 0%,#303030 100%)",
+              border:"2px solid #d4d4d4",
+              display:"flex",alignItems:"center",justifyContent:"center",
+              cursor:"grab",fontSize:f(11),fontWeight:"bold",color:"#f5f5f5",
+              userSelect:"none",zIndex:10,
+              boxShadow:"0 0 14px #ffffff22",transition:"transform .1s",
+            }} onMouseDown={e=>startD(e,{type:"pi",idx:i})}>
+              {nm}
+            </div>
+          );
+        })}
+
+        {/* Node grid */}
+        {nodes.map((row,r) => row.map((node,c) => {
+          const x=nx(c), y=ny(r), isSel=sel?.r===r&&sel?.c===c;
+          const pa=pA(r,c), pb=pB(r,c), po=pO(r,c);
+          const col=OP_CLR[node.op], val=stages[r][c];
+
+          return (
+            <div key={`n${r}${c}`}>
+              {/* Node card */}
+              <div style={{
+                position:"absolute",left:x,top:y,width:NW,height:NH,
+                background:isSel?"#262626":T.bg2,
+                border:`1px solid ${isSel?col:T.bdr}`,
+                borderTop:`3px solid ${col}`,
+                borderRadius:7,
+                display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+                cursor:"pointer",zIndex:5,
+                boxShadow:isSel?`0 0 20px ${col}55,inset 0 0 30px ${col}08`:"none",
+                transition:"box-shadow .2s,border-color .2s"
+              }} onClick={()=>setSel(isSel?null:{r,c})}>
+                <div style={{
+                  color:col,fontSize:f(10),fontWeight:"bold",letterSpacing:.5,
+                  textShadow:isSel?`0 0 8px ${col}`:undefined, marginBottom:3
+                }}>{node.op}</div>
+                <div style={{fontSize:f(8),color:T.muted,letterSpacing:.3}}>
+                  {iname(r,node.selA)}-&gt;A &nbsp; {iname(r,node.selB)}-&gt;B
+                </div>
+                <div style={{position:"absolute",top:2,left:4,fontSize:f(7),color:T.bdr}}>R{r}C{c}</div>
+              </div>
+
+              {/* Port A */}
+              <div title="Input A (drop here)" style={{
+                position:"absolute",left:pa.x-7,top:pa.y-7,
+                width:14,height:14,borderRadius:"50%",
+                background:T.bg0,border:"2px solid #f2f2f2",
+                cursor:"crosshair",zIndex:15,boxShadow:"0 0 6px #ffffff40"
+              }} onMouseUp={e=>drop(e,r,c,"A")}/>
+
+              {/* Port B */}
+              <div title="Input B (drop here)" style={{
+                position:"absolute",left:pb.x-7,top:pb.y-7,
+                width:14,height:14,borderRadius:"50%",
+                background:T.bg0,border:"2px solid #bdbdbd",
+                cursor:"crosshair",zIndex:15,boxShadow:"0 0 6px #ffffff30"
+              }} onMouseUp={e=>drop(e,r,c,"B")}/>
+
+              {/* Output port */}
+              <div title="Drag to next row's input port" style={{
+                position:"absolute",left:po.x-7,top:po.y-7,
+                width:14,height:14,borderRadius:"50%",
+                background:T.bg0,border:"2px solid #8b8b8b",
+                cursor:"grab",zIndex:15,boxShadow:"0 0 6px #ffffff2a"
+              }} onMouseDown={e=>startD(e,{type:"no",row:r,col:c})}/>
+
+              {/* Stage output value */}
+              <div style={{
+                position:"absolute",left:po.x-24,top:po.y+9,
+                width:48,textAlign:"center",fontSize:f(9),color:"#f0f0f0",zIndex:4,
+                textShadow:"0 0 6px #ffffff44"
+              }}>{val}</div>
+            </div>
+          );
+        }))}
+
+        {/* Bottom label */}
+        <div style={{
+          position:"absolute",bottom:8,left:0,right:0,textAlign:"center",
+          fontSize:f(8),color:T.bdr,letterSpacing:2,textTransform:"uppercase"
+        }}>
+          4x4 Reconfigurable Functional Unit
+        </div>
+        </div>
+      </div>
+
+      {/* RIGHT PANEL */}
+      <div style={{width:230,flexShrink:0,padding:"10px 10px",background:T.bg1,
+        borderLeft:"1px solid "+T.bdr,overflowY:"auto"}}>
+
+        {selN ? (
+          <>
+            {/* Node header */}
+            <div style={{
+              background:T.bg3,border:"1px solid "+T.bdr,borderRadius:7,
+              padding:"8px 10px",marginBottom:14,
+              borderLeft:`3px solid ${OP_CLR[selN.op]}`
+            }}>
+              <div style={{color:T.dim,fontSize:f(8),marginBottom:3}}>SELECTED NODE</div>
+              <div style={{color:T.acc,fontSize:f(12),fontWeight:"bold"}}>R{sel.r} . C{sel.c}</div>
+            </div>
+
+            <div style={{color:T.dim,fontSize:f(9),marginBottom:3}}>Operation</div>
+            <select value={selN.op} onChange={e=>upd(sel.r,sel.c,{op:e.target.value})} style={selSty}>
+              {OPS.map(o=><option key={o}>{o}</option>)}
+            </select>
+
+            <div style={{color:T.dim,fontSize:f(9),marginBottom:3}}>
+              <span style={{color:"#f2f2f2"}}>*</span> Input A
+            </div>
+            <select value={selN.selA} onChange={e=>upd(sel.r,sel.c,{selA:+e.target.value})} style={selSty}>
+              {inputOpts(sel.r).map(({l,v})=><option key={v} value={v}>{l}</option>)}
+            </select>
+
+            <div style={{color:T.dim,fontSize:f(9),marginBottom:3}}>
+              <span style={{color:"#bdbdbd"}}>*</span> Input B
+            </div>
+            <select value={selN.selB} onChange={e=>upd(sel.r,sel.c,{selB:+e.target.value})} style={selSty}>
+              {inputOpts(sel.r).map(({l,v})=><option key={v} value={v}>{l}</option>)}
+            </select>
+
+            {/* Output value */}
+            <div style={{
+              background:T.bg3,border:"1px solid #7a7a7a55",borderRadius:7,
+              padding:"10px 12px",marginBottom:10
+            }}>
+              <div style={{color:T.dim,fontSize:f(8),marginBottom:4}}>OUTPUT VALUE</div>
+              <div style={{color:"#f5f5f5",fontSize:f(18),fontWeight:"bold",
+                lineHeight:1.1,letterSpacing:0,
+                whiteSpace:"nowrap",overflowX:"auto",overflowY:"hidden",
+                textShadow:"0 0 12px #ffffff40"}}>
+                {stages[sel.r][sel.c]}
+              </div>
+              <div style={{color:T.muted,fontSize:f(9),marginTop:3}}>{OP_DESC[selN.op]}</div>
+            </div>
+
+            {/* Row outputs */}
+            <div style={secHdr()}>Row {sel.r} Pipeline</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,marginBottom:12}}>
+              {stages[sel.r].map((v,i) => (
+                <div key={i} style={{
+                  background:i===sel.c?"#262626":T.bg3,
+                  border:"1px solid "+(i===sel.c?"#d9d9d9":T.bdr),
+                  borderRadius:5,padding:"4px 8px",fontSize:f(9)
+                }}>
+                  <div style={{color:T.muted,fontSize:f(8)}}>P{i}</div>
+                  <div style={{color:i===sel.c?"#ffffff":"#a0a0a0",fontWeight:i===sel.c?"bold":"normal"}}>{v}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Op legend */}
+            <div style={secHdr()}>All Operations</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+              {OPS.map(op=>(
+                <div key={op} style={{
+                  fontSize:f(8),padding:"2px 5px",borderRadius:3,
+                  background:op===selN.op?OP_CLR[op]+"30":"transparent",
+                  color:OP_CLR[op],
+                  border:`1px solid ${op===selN.op?OP_CLR[op]+"60":T.bdr}`,
+                  cursor:"pointer"
+                }} onClick={()=>upd(sel.r,sel.c,{op})}>
+                  {op}
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{color:T.acc,fontSize:hf(10),fontWeight:"bold",marginBottom:9}}>How to Use</div>
+
+            {/* Steps */}
+            {[
+              ["1","Drag letter circles","onto input ports to wire connections"],
+              ["2","Drag output ports","to a port on the NEXT row to create pipeline connections"],
+              ["3","Click any node","to configure its operation and inputs via dropdowns"],
+              ["4","Edit input values","on the left to simulate in real-time"],
+            ].map(([n,b,t],i)=>(
+              <div key={i} style={{marginBottom:6,display:"flex",gap:6}}>
+                <span style={{color:T.acc,fontSize:hf(11),flexShrink:0}}>{n}</span>
+                <div>
+                  <div style={{color:"#e2e8f0",fontSize:hf(9),fontWeight:"bold",marginBottom:1}}>{b}</div>
+                  <div style={{color:T.dim,fontSize:hf(8),lineHeight:1.35}}>{t}</div>
+                </div>
+              </div>
+            ))}
+
+            <div style={secHdr()}>Architecture</div>
+            <div style={{fontSize:hf(8),lineHeight:1.65,color:T.dim}}>
+              <div>4x4 grid . 16 nodes max</div>
+              <div>Row 0: 8 primary inputs</div>
+              <div>Row 1-3: 8 primary + 4 pipeline</div>
+              <div>64-bit config word per row</div>
+              <div>8 operation types per node</div>
+            </div>
+
+            <div style={secHdr()}>Operations</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+              {OPS.map(op=>(
+                <div key={op} style={{
+                  fontSize:hf(7),padding:"2px 5px",borderRadius:3,
+                  color:OP_CLR[op],border:`1px solid ${OP_CLR[op]}50`,
+                  background:OP_CLR[op]+"15"
+                }}>{op}</div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div style={{marginTop:14,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+          <button onClick={copyVerilog} style={{
+            width:"100%",maxWidth:146,textAlign:"center",
+            padding:"8px 10px",background:copied?"#2f2f2f":T.bg3,
+            color:copied?"#ffffff":T.dim,border:"1px solid "+(copied?"#ffffff":T.bdr),
+            borderRadius:5,cursor:"pointer",fontSize:f(10),fontFamily:T.font,
+            letterSpacing:.5,transition:"all .2s"
+          }}>
+            {copied ? "Copied!" : "Copy Verilog TB"}
+          </button>
+          <button onClick={()=>setNodes(DEF.map(r=>r.map(n=>({...n}))))} style={{
+            width:"100%",maxWidth:146,textAlign:"center",
+            padding:"8px 10px",background:"transparent",color:T.muted,
+            border:"1px solid "+T.bdr,borderRadius:5,cursor:"pointer",
+            fontSize:f(10),fontFamily:T.font,letterSpacing:.5
+          }}>
+            Reset to Default
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<RFUDesigner />);
+    </script>
+  </body>
+</html>
 
